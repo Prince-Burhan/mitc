@@ -1,0 +1,224 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ============================================
+    // HELPER FUNCTIONS
+    // ============================================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user is admin
+    function isAdmin() {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    // Check if user owns the document
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Validate product data structure
+    function isValidProduct() {
+      return request.resource.data.keys().hasAll([
+        'title', 'brand', 'model', 'price', 'condition', 
+        'stockCount', 'published', 'createdAt', 'updatedAt'
+      ]) &&
+      request.resource.data.title is string &&
+      request.resource.data.title.size() > 0 &&
+      request.resource.data.price is number &&
+      request.resource.data.price >= 0 &&
+      request.resource.data.stockCount is number &&
+      request.resource.data.stockCount >= 0 &&
+      request.resource.data.published is bool;
+    }
+    
+    // Validate customer data structure
+    function isValidCustomer() {
+      return request.resource.data.keys().hasAll([
+        'name', 'phone', 'email', 'purchaseDate', 
+        'warrantyEndDate', 'status', 'createdAt'
+      ]) &&
+      request.resource.data.name is string &&
+      request.resource.data.email is string &&
+      request.resource.data.phone is string &&
+      request.resource.data.status in ['Active', 'Warranty Expired', 'Review Requested', 'Completed'];
+    }
+    
+    // Validate review data structure
+    function isValidReview() {
+      return request.resource.data.keys().hasAll([
+        'customerName', 'rating', 'comment', 'status', 'createdAt'
+      ]) &&
+      request.resource.data.rating is number &&
+      request.resource.data.rating >= 1 &&
+      request.resource.data.rating <= 5 &&
+      request.resource.data.comment is string &&
+      request.resource.data.comment.size() > 0 &&
+      request.resource.data.status in ['Pending', 'Approved', 'Rejected'];
+    }
+    
+    
+    // ============================================
+    // USERS COLLECTION
+    // ============================================
+    match /users/{userId} {
+      // Anyone authenticated can read their own profile
+      // Admins can read all profiles
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Users can create their own profile during signup
+      allow create: if isOwner(userId) && 
+                       request.resource.data.role == 'user' &&
+                       request.resource.data.email == request.auth.token.email;
+      
+      // Users can update their own profile (except role)
+      // Admins can update any profile
+      allow update: if (isOwner(userId) && 
+                        request.resource.data.role == resource.data.role) || 
+                       isAdmin();
+      
+      // Only admins can delete users
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================
+    // PRODUCTS COLLECTION
+    // ============================================
+    match /products/{productId} {
+      // Public can read published products
+      // Admins can read all products
+      allow read: if resource.data.published == true || isAdmin();
+      
+      // Only admins can create products (with validation)
+      allow create: if isAdmin() && isValidProduct();
+      
+      // Only admins can update products (with validation)
+      allow update: if isAdmin() && isValidProduct();
+      
+      // Only admins can delete products
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================
+    // CUSTOMERS COLLECTION
+    // ============================================
+    match /customers/{customerId} {
+      // Only admins can read customer data
+      allow read: if isAdmin();
+      
+      // Only admins can create customers (with validation)
+      allow create: if isAdmin() && isValidCustomer();
+      
+      // Only admins can update customers (with validation)
+      allow update: if isAdmin() && isValidCustomer();
+      
+      // Only admins can delete customers
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================
+    // STORE REVIEWS COLLECTION
+    // ============================================
+    match /storeReviews/{reviewId} {
+      // Public can read approved reviews
+      // Admins can read all reviews
+      allow read: if resource.data.status == 'Approved' || isAdmin();
+      
+      // Anyone can create a review (with validation)
+      // Reviews are created as 'Pending' by default
+      allow create: if isValidReview() && 
+                       request.resource.data.status == 'Pending';
+      
+      // Only admins can update reviews (approve/reject)
+      allow update: if isAdmin();
+      
+      // Only admins can delete reviews
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================
+    // SETTINGS COLLECTION
+    // ============================================
+    match /settings/{document} {
+      // Anyone can read settings (for public site configuration)
+      allow read: if true;
+      
+      // Only admins can create settings
+      allow create: if isAdmin();
+      
+      // Only admins can update settings
+      allow update: if isAdmin();
+      
+      // Only admins can delete settings
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================
+    // ANALYTICS COLLECTION (Optional)
+    // ============================================
+    match /analytics/{document=**} {
+      // Only admins can read analytics
+      allow read: if isAdmin();
+      
+      // Authenticated users can write analytics (page views, etc.)
+      allow write: if isAuthenticated();
+    }
+    
+    
+    // ============================================
+    // CONTACT SUBMISSIONS (Optional)
+    // ============================================
+    match /contactSubmissions/{submissionId} {
+      // Only admins can read contact submissions
+      allow read: if isAdmin();
+      
+      // Anyone can create contact submissions
+      allow create: if true;
+      
+      // Only admins can update/delete submissions
+      allow update, delete: if isAdmin();
+    }
+    
+    
+    // ============================================
+    // NOTIFICATIONS COLLECTION (Optional)
+    // ============================================
+    match /notifications/{notificationId} {
+      // Users can read their own notifications
+      // Admins can read all notifications
+      allow read: if isAuthenticated() && 
+                     (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // Only admins can create notifications
+      allow create: if isAdmin();
+      
+      // Users can mark their notifications as read
+      // Admins can update any notification
+      allow update: if (isAuthenticated() && 
+                        resource.data.userId == request.auth.uid &&
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])) ||
+                       isAdmin();
+      
+      // Only admins can delete notifications
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================
+    // DENY ALL OTHER COLLECTIONS
+    // ============================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
